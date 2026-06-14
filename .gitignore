@@ -1,0 +1,13 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+*_cache/
+*_files/
+.rcpp_cache/
+_targets/
+Results/
+logs/
+Data/monthly.xlsx
+Data/*.RDS

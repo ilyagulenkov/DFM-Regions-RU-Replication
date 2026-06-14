@@ -1,0 +1,1464 @@
+---
+title: "Приложение. Оперативная оценка региональной экономической активности в России с использованием динамических факторных моделей"
+lang: ru
+output: 
+  officedown::rdocx_document:
+    base_format: "bookdown::word_document2"
+    reference_docx: "../../Technical/template.docx"
+    pandoc_args: [ "--csl", "../../Technical/apa-no-ampersand.csl"]
+    global_numbering: false
+    plots:
+      caption:
+        pre: "Рисунок "
+        sep: ". "
+      topcaption: true
+    tables:
+      caption:
+        style: Table Caption
+        pre: "Таблица "
+        sep: ". "
+header-includes:
+  - \usepackage{tikz} 
+  - \usepackage[T2A]{fontenc}
+  - \usepackage[main=russian,english]{babel}
+  - \usepackage{lscape}
+bibliography: ../../Literature/DFMRU.bib
+biblio-style: apalike
+---
+
+\newcommand{\vb}[1]{\mathbf{#1}}      
+\newcommand{\vbs}[1]{\boldsymbol{#1}} 
+\newcommand{\BlankRow}{\vphantom{\vb{I}_{22}}}
+
+\newcommand{\mqty}[1]{\begin{matrix}#1\end{matrix}}
+\newcommand{\pmqty}[1]{\left(\begin{matrix}#1\end{matrix}\right)} 
+\newcommand{\bmqty}[1]{\left[\begin{matrix}#1\end{matrix}\right]} 
+\newcommand{\vmqty}[1]{\left\|\begin{matrix}#1\end{matrix}\right\|} 
+\newcommand{\mqtyv}[1]{\left|\begin{matrix}#1\end{matrix}\right|} 
+\newcommand{\Pmqty}[1]{\left\{\begin{matrix}#1\end{matrix}\right\}} 
+\DeclareMathOperator{\diag}{diag}
+
+\newcommand{\blandscape}{\begin{landscape}}
+\newcommand{\elandscape}{\end{landscape}}
+
+\newpage
+
+```{r}
+#| label: setup
+#| echo: FALSE
+#| include: FALSE
+library(readxl)
+library(tidyverse)
+library(ggthemes)
+library(ggpubr)
+library(showtext)
+library(stringi)
+library(latex2exp)
+library(flextable)
+library(ggtext)
+library(geofacet)
+library(scales)
+library(ggpattern)
+library(ggridges)
+library(ggbreak)
+library(spatstat)
+library(sandwich)
+library(lmtest)
+library(ggcorrplot)
+library(glue)
+library(targets)
+library(ggh4x)
+library(coda)
+library(zoo)
+set.seed(12345)
+#------------------------------------------------#
+# GLOBAL SETTINGS ----
+#------------------------------------------------#
+font_add("Times", "C:/Windows/Fonts/times.ttf")
+showtext_auto()
+options(scipen = 9999)
+PROJECT_ROOT <- local({
+  ci <- tryCatch(knitr::current_input(dir = TRUE), error = function(e) NULL)
+  if (!is.null(ci)) {
+    normalizePath(file.path(dirname(ci), "../.."))
+  } else {
+    normalizePath(getwd())
+  }
+})
+tar_config_set(store = file.path(PROJECT_ROOT, "_targets"))
+select <- dplyr::select
+cols <- c('#595959', '#262626')
+cols_1 <- c('#8cc5e3', '#3594cc')
+cols_2 <- c('#9fc8c8', '#298c8c')
+PLOT_FONT_SIZE <- 17
+PLOT_DPI <- 300
+path <- file.path(PROJECT_ROOT, "Data/РегДанные.xlsx")
+# RUN_TAG <- tar_read(runTag)
+RUN_TAG <- '09_04'
+MODEL_CASE <- "GDP"
+BENCHMARK <- "rw"
+HORIZONS <- c(6, 5, 4, 3, 2, 1, 0, -3, -6)
+BOXPLOT_HORIZONS <- c(3, 0, -3, -6)
+EST_FOLDER <- file.path(
+  PROJECT_ROOT,
+  "Results",
+  paste0("EST_", RUN_TAG, "_", MODEL_CASE)
+)
+est_files <- list.files(
+  EST_FOLDER,
+  pattern = "^FACTORS.*\\.xlsx$",
+  full.names = TRUE
+)
+source(file.path(PROJECT_ROOT, "R/functions.R"))
+vargroups <- c(1, 2)
+SAMPLE_START <- as.Date('2009-01-01')
+SAMPLE_END <- as.Date('2025-11-01')
+codes <- read_excel(path, sheet = 'КОДЫ') %>%
+  select(name_official, name_rus, name_short, abbrev, OKATO_id) %>%
+  arrange(abbrev) %>%
+  filter(!is.na(abbrev))
+#------------------------------------------------#
+# TECHNICAL ----
+#------------------------------------------------#
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  echo = FALSE,
+  cache = FALSE
+)
+theme_set(
+  theme_minimal() +
+    theme(
+      text = element_text(size = PLOT_FONT_SIZE),
+      legend.text = element_text(size = PLOT_FONT_SIZE),
+      strip.placement = "outside",
+      strip.text.x = element_text(size = PLOT_FONT_SIZE, angle = 0),
+      strip.text.y.left = element_text(size = PLOT_FONT_SIZE, angle = 0),
+      strip.text.y.right = element_text(size = PLOT_FONT_SIZE, angle = 0),
+      legend.position = 'bottom',
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      axis.ticks.y = element_line(),
+      axis.ticks.x = element_line(),
+      axis.line.x = element_line(),
+      axis.line.y = element_line(),
+      axis.text.y.right = element_text(margin = margin(l = 0.5, r = 0))
+    )
+)
+set_flextable_defaults(font.family = 'Times New Roman')
+tabForm <- function(x, cap = NULL, dig = 2, na_str = "\u2013") {
+  x %>%
+    # autofit() %>%
+    set_table_properties(layout = "autofit", width = 1) %>%
+    font(fontname = 'Times New Roman', part = 'all') %>%
+    padding(padding = 0, part = "all") %>%
+    align(align = "center", part = "all") %>%
+    align(align = 'justify', part = 'footer') %>%
+    colformat_double(big.mark = "", digits = dig, na_str = na_str) %>%
+    set_caption(
+      cap,
+      align_with_table = F,
+      word_stylename = "Table Caption",
+      fp_p = officer::fp_par(text.align = "justify")
+    )
+}
+figNote <- function(text) {
+  officer::fpar(
+    paste0('Примечание: ', text),
+    fp_p = officer::fp_par(text.align = 'justify', padding.top = 0),
+    fp_t = officer::fp_text_lite(font.size = 11)
+  )
+}
+local({
+  old_hook <- knitr::knit_hooks$get("inline")
+  knitr::knit_hooks$set(inline = function(x) {
+    if (inherits(x, "fpar")) {
+      paste(
+        vapply(
+          x$chunks,
+          function(r) {
+            if (is.character(r)) {
+              r
+            } else if (inherits(r, "ftext")) {
+              r$value
+            } else {
+              as.character(r)
+            }
+          },
+          character(1L)
+        ),
+        collapse = ""
+      )
+    } else if (inherits(x, "run")) {
+      paste0("`", officer::to_wml(x), "`{=openxml}")
+    } else {
+      old_hook(x)
+    }
+  })
+})
+knitr::opts_chunk$set(
+  dev = "svg"
+)
+```
+
+
+```{r}
+#| label: aggsummary
+summarystats <- tar_read(summaryStats)
+summaryStats1 <- summarystats$summaryStats1
+summaryStats2 <- summarystats$summaryStats2
+summaryStats2[summaryStats2$Индикатор == 'rprofits', -1] <- summaryStats2[
+  summaryStats2$Индикатор == 'rprofits',
+  -1
+] /
+  1000
+renameVectorEng <- summarystats$renameVectorEng
+renameVectorEngShort <- summarystats$renameVectorEngShort
+renameVectorRu <- summarystats$renameVectorRu
+renameVectorRuShort <- summarystats$renameVector
+metadata <- summarystats$metadata %>%
+  mutate(sample = str_replace_all(sample, '--', '\\u2013\\u200d'))
+corstats <- summarystats$corstats
+```
+
+```{r}
+#| label: lambda
+#| fig.cap: "Распределение медианных факторных нагрузок в регионах"
+#| fig.width: 10
+#| out.width: "60%"
+#| dpi: !expr PLOT_DPI
+lambda <- map_dfr(est_files, function(f) {
+  read_excel(f, sheet = 'lambda') %>%
+    mutate(
+      abbrev = str_extract(basename(f), "(?<=FACTORS)[A-Z]+"),
+      var = str_remove(var, "\\.[A-Z]+$")
+    )
+})
+varidio <- map_dfr(est_files, function(f) {
+  read_excel(f, sheet = 'sig') %>%
+    mutate(
+      abbrev = str_extract(basename(f), "(?<=FACTORS)[A-Z]+"),
+      var = str_remove(var, "\\.[A-Z]+$")
+    )
+})
+```
+
+\appendix
+\renewcommand{\thesection}{Appendix \Alph{section}}
+
+\setcounter{table}{0}
+\renewcommand{\thetable}{\Alph{section}\arabic{table}}
+
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{\Alph{section}\arabic{figure}}
+
+
+# Динамика ВРП и региональных индексов базовых отраслей {-}
+
+```{r}
+#| label: grpibifig
+#| fig.cap: "Темпы роста суммарного ВРП российских регионов и общенационального индекса выпуска базовых отраслей, \\% г/г"
+#| fig.width: 10
+#| out.width: "60%"
+#| dpi: !expr PLOT_DPI
+ivbo_rus <- read_excel(path, sheet = 'ИВБО (2003-2024)') %>%
+  filter(!is.na(yoy_yearly)) %>%
+  select(date, ivbo = yoy_yearly) %>%
+  mutate(date = date - months(11), ivbo = (ivbo / 100 - 1) * 100)
+grp_rus <- read_excel(
+  path,
+  sheet = 'ВРПИФО (1997-2023)',
+  range = 'E3:AE4',
+  col_names = FALSE
+) %>%
+  t() %>%
+  data.frame() %>%
+  rename_with(~ c('date', 'grp')) %>%
+  mutate(
+    grp = (as.numeric(grp) / 100 - 1) * 100,
+    date = as.Date(paste0(date, '-01-01'))
+  )
+ivbo_grp_comp <- ivbo_rus %>%
+  left_join(grp_rus)
+ivbo_grp_comp %>%
+  filter(date >= as.Date('2009-01-01')) %>%
+  ggplot() +
+  geom_line(
+    aes(x = date, y = ivbo, color = 'Индекс выпуска базовых отраслей'),
+    linewidth = 1
+  ) +
+  geom_line(aes(x = date, y = grp, color = 'Суммарный ВРП'), linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = 'dashed', linewidth = 0.5) +
+  labs(x = NULL, y = NULL) +
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      'Индекс выпуска базовых отраслей' = 'grey',
+      'Суммарный ВРП' = 'black'
+    )
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1, scale = 1))
+```
+
+```{r}
+#| label: ivboregfig
+#| fig.cap: "Распределение ошибок аппроксимации годового темпа роста ВРП через накопленный с начала года темп роста регионального ИВБО, п.п."
+#| out.width: "80%"
+#| dpi: !expr PLOT_DPI
+ivboYtdData <- tar_read(ivboYtd)
+grpData <- tar_read(grp)
+grpYoYAnnual <- grpData %>%
+  group_by(Abbrev) %>%
+  arrange(date) %>%
+  mutate(grpYoY = log(value / lag(value)) * 100, year = year(date)) %>%
+  ungroup() %>%
+  filter(!is.na(grpYoY)) %>%
+  select(Abbrev, year, grpYoY)
+ivboErrors <- ivboYtdData %>%
+  inner_join(grpYoYAnnual, by = c("Abbrev", "year")) %>%
+  mutate(error = ivboYtdGrowth - grpYoY) %>%
+  select(Abbrev, year, error)
+ggplot(ivboErrors, aes(x = factor(year), y = error)) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 1,
+    colour = "#262626"
+  ) +
+  geom_boxplot(
+    linewidth = 1,
+    fill = "#bfbfbf",
+    colour = "#262626",
+    outlier.size = 1.5
+  ) +
+  labs(x = NULL, y = "п.п.") +
+  theme(
+    axis.title.y = element_text(
+      angle = 0,
+      vjust = 1.05,
+      margin = margin(r = 5)
+    ),
+    plot.margin = margin(t = 25, r = 10, b = 5, l = 5)
+  )
+```
+
+\newpage
+
+<!---BLOCK_LANDSCAPE_START--->
+
+# Описательные статистики региональных экономических переменных {-}
+
+```{r}
+#| label: regsummary
+summaryStats1 %>%
+  mutate(rprofits = rprofits / 10^3) %>%
+  select(
+    Region = region,
+    all_of(metadata$variable[metadata$group %in% vargroups])
+  ) %>%
+  select(-ivbom) %>%
+  rename(any_of(renameVectorRuShort)) %>%
+  flextable() %>%
+  tabForm()
+```
+
+\newpage
+
+<!---BLOCK_LANDSCAPE_STOP--->
+
+# Факторная структура региональных данных {-}
+
+```{r}
+#| label: pca-variance
+#| cache: true
+ss_raw <- read_excel(
+  file.path(PROJECT_ROOT, "Data/monthly.xlsx"),
+  sheet = "econSS"
+)
+var_cols <- setdiff(names(ss_raw), c("date", "year", "quarter"))
+groups_row <- as.numeric(ss_raw[3, var_cols])
+names(groups_row) <- var_cols
+data_rows <- 4:nrow(ss_raw)
+region_abbrevs <- unique(sub("^.*\\.", "", var_cols))
+
+pca_results <- map_dfr(region_abbrevs, function(reg) {
+  reg_cols <- var_cols[grepl(paste0("\\.", reg, "$"), var_cols)]
+  reg_cols <- reg_cols[groups_row[reg_cols] %in% vargroups]
+  x_mat <- ss_raw[data_rows, reg_cols] %>%
+    mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+  all_na_col <- colSums(!is.na(x_mat)) == 0
+  x_mat <- x_mat[, !all_na_col, drop = FALSE]
+  row_all_na <- rowSums(!is.na(x_mat)) == 0
+  x_mat <- x_mat[!row_all_na, , drop = FALSE]
+  em_res <- factors_em(x_mat, kmax = 99, jj = 1, DEMEAN = 2, NFAC = 1)
+  ve <- em_res$ve2
+  tibble(
+    abbrev = reg,
+    n_vars = ncol(x_mat),
+    pct_pc1 = ve[1] / sum(ve) * 100
+  )
+})
+
+pca_table <- pca_results %>%
+  left_join(codes %>% select(abbrev, Region = name_rus), by = "abbrev") %>%
+  select(Region, n_vars, pct_pc1) %>%
+  arrange(Region)
+avg_row <- tibble(
+  Region = "Среднее",
+  n_vars = NA_real_,
+  pct_pc1 = mean(pca_results$pct_pc1)
+)
+pca_display <- bind_rows(pca_table, avg_row)
+
+pca_display %>%
+  rename(
+    `Регион` = Region,
+    `Кол-во переменных` = n_vars,
+    `Доля дисперсии PC1, %` = pct_pc1
+  ) %>%
+  flextable() %>%
+  bold(i = nrow(pca_display), part = "body") %>%
+  hline(i = nrow(pca_display) - 1, part = "body") %>%
+  add_footer_lines(
+    "Примечание: для каждого региона извлекались все переменные панели (включая ВРП). Пропущенные значения обрабатывались с помощью EM-алгоритма. Переменные стандартизированы (среднее = 0, ст. откл. = 1)."
+  ) %>%
+  tabForm(
+    cap = "Доля дисперсии, объяснённая первой главной компонентой (EM-PCA)"
+  ) %>%
+  colformat_double(j = "Кол-во переменных", digits = 0) %>%
+  colformat_double(j = "Доля дисперсии PC1, %", digits = 1)
+```
+
+\newpage
+
+# Ошибка аппроксимации при использовании геометрического среднего вместо арифметического {-}
+
+В разделе "Методология" текста статьи для квартальной переменной $Y_{q_t}$ предполагается, что её значение равно среднему трёх ненаблюдаемых месячных уровней $X_t$. Согласно подходу @marianoNewCoincidentIndex2003, арифметическое среднее заменяется геометрическим:
+
+$$
+Y_{q_t} \;=\; \tfrac{1}{3}(X_t + X_{t-1} + X_{t-2}) \;\approx\; (X_t X_{t-1} X_{t-2})^{1/3}.
+$$
+
+Квартальный (логарифмический) темп роста г/г без аппроксимации равен:
+
+$$
+\ln Y_{q_t} - \ln Y_{q_t-4} \;=\; \ln(X_t + X_{t-1} + X_{t-2}) \;-\; \ln(X_{t-12} + X_{t-13} + X_{t-14}),
+$$
+
+а при использовании аппроксимации составляет:
+
+$$
+\ln Y_{q_t} - \ln Y_{q_t-4} \;\approx\; \tfrac{1}{3} \sum_{j=0}^{2} (\ln X_{t-j} - \ln X_{t-12-j}).
+$$
+
+Ошибка аппроксимации представляет собой разность этих двух выражений:
+
+$$
+\Delta \;=\; \tfrac{1}{3} \sum_{j=0}^{2} (\ln X_{t-j} - \ln X_{t-12-j}) \;-\; \ln \frac{X_t + X_{t-1} + X_{t-2}}{X_{t-12} + X_{t-13} + X_{t-14}}.
+$$
+
+Обозначим $g_{t-j} = \ln X_{t-j} - \ln X_{t-12-j}$ -- месячный темп роста г/г уровня $X$, $\bar g = \tfrac{1}{3}(g_t + g_{t-1} + g_{t-2})$ -- его среднее по кварталу. Пусть доли уровней базисного года в их сумме равны:
+
+$$
+w_j \;=\; \frac{X_{t-12-j}}{\sum_{k=0}^{2} X_{t-12-k}}, \qquad w_j \geq 0, \quad \sum_{j=0}^{2} w_j = 1.
+$$
+
+Тогда:
+
+$$
+\Delta \;=\; \bar g - \ln  e^{\bar g}\, \sum_{j=0}^{2} w_j\, e^{g_{t-j} - \bar g} \;=\; -\ln \sum_{j=0}^{2} w_j\, e^{g_{t-j} - \bar g},
+$$
+
+Таким образом, ошибка аппроксимации является функцией от того, насколько месячные темпы роста г/г отличаются от внутриквартального среднего. Для большинства используемых переменных значения весов $w_j$ в базисном году являются ненаблюдаемыми, так как показатели публикуются в виде темпов роста, а не уровней. Однако в предположении, что $w_j \approx 1/3$ ошибка аппроксимации может быть сведена к половине внутриквартальной дисперсии месячных темпов роста г/г:
+
+$$
+|\Delta| \;\approx\; \tfrac{1}{2}\,\mathrm{Var}(g_{t-j}),
+$$
+
+На рис. \@ref(fig:mmApproxBias) приведено распределение медианных значений $|\Delta|$ на основе данных о промышленном производстве и оптовой торговле за 2009--2025 гг.
+
+```{r}
+#| label: mmApproxBias
+#| fig.cap: "Распределение медианных значений |Δ| по регионам РФ, п.п."
+#| fig.width: 10
+#| fig.height: 7
+#| out.width: "70%"
+#| dpi: !expr PLOT_DPI
+mmIndustry <- read_excel(path, sheet = "Пром г-г (2009-2024)") %>%
+  pivot_longer(
+    -c(region, OKATO_id),
+    names_to = "date",
+    values_to = "value"
+  ) %>%
+  mutate(
+    date = as.Date(as.numeric(date), origin = "1899-12-30"),
+    series = "Промышленное производство"
+  )
+mmWholesale <- read_excel(path, sheet = "Опт г-г (2009-2025)") %>%
+  select(-1) %>%
+  pivot_longer(
+    -c(region, OKATO_id),
+    names_to = "date",
+    values_to = "value"
+  ) %>%
+  mutate(
+    date = as.Date(as.numeric(date), origin = "1899-12-30"),
+    series = "Оптовая торговля"
+  )
+mmPerRegion <- bind_rows(mmIndustry, mmWholesale) %>%
+  filter(!is.na(OKATO_id), !is.na(value), value > 0) %>%
+  group_by(series, OKATO_id) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    g = log(value / 100),
+    varQ = rollapplyr(g, width = 3, FUN = var, fill = NA),
+    delta = 100 * varQ / 3
+  ) %>%
+  filter(is.finite(delta)) %>%
+  summarise(typical = median(delta), .groups = "drop") %>%
+  mutate(
+    series = factor(
+      series,
+      levels = c("Промышленное производство", "Оптовая торговля")
+    )
+  )
+mmMedians <- mmPerRegion %>%
+  group_by(series) %>%
+  summarise(med = median(typical), .groups = "drop") %>%
+  mutate(label = sub("\\.", ",", sprintf("%.2f п.п.", med)))
+ggplot(mmPerRegion, aes(typical)) +
+  geom_histogram(bins = 25, fill = cols_1[2], colour = "white") +
+  geom_vline(
+    data = mmMedians,
+    aes(xintercept = med),
+    linetype = "dashed",
+    colour = "grey30"
+  ) +
+  geom_text(
+    data = mmMedians,
+    aes(x = med, y = Inf, label = label),
+    hjust = -0.15,
+    vjust = 1.7,
+    size = 5,
+    colour = "grey30"
+  ) +
+  facet_wrap(~series, ncol = 1, scales = "free_y") +
+  labs(x = "Медиана |Δ| по региону, п.п.", y = "Число регионов")
+```
+
+\newpage
+
+# Полная спецификация модели пространства состояний {-}
+
+Оцениваемая система уравнений имеет вид:
+\begin{align}
+\vb{y}_t &= \vb{H} \vbs{\xi}_t \\
+\vbs{\xi}_t &= \vb{F} \vbs{\xi}_{t-1} + \vbs{\nu}_t, \vbs{\nu}_t \sim \mathcal{N}(0, \vb{R})
+\end{align}
+
+Вектор состояний $\vbs{\xi}_t$ включает общий фактор $f_t$ и его лаги, идиосинкратические компоненты $u_{i,t}$ и их лаги, а также трендовую составляющую $\tau_t$ и её лаги. Матрица наблюдения $\vb{H} = \bmqty{ \vb{H_y} & \vb{H_q} & \vb{H_m} }'$ имеет вид (столбцы соответствуют блокам: фактор, идиосинкратические компоненты ВРП, квартальных, месячных переменных, тренд):
+$$
+\begin{aligned}
+\vb{H_y} &=
+\left[
+\begin{array}{ccccc}
+  \lambda_1\, \vbs{\gamma}^{y}_{1\times 23} &
+  \vbs{\gamma}^{y}_{1\times 23} &
+  \vb{0}_{1\times (n_q \cdot 14)} &
+  \vb{0}_{1\times (n_m \cdot 12)} &
+  \vbs{\gamma}^{y}_{1\times 23}
+\end{array}
+\right] \\
+\vb{H_q} &=
+\left[
+\begin{array}{ccccccc}
+  \lambda_2\, \vbs{\gamma}^{q}_{1\times 14} &
+  \vb{0}_{1\times 9} &
+  \vb{0}_{1\times 23} &
+  \vbs{\gamma}^{q}_{1\times 14} &
+  \vb{0}_{1\times ((n_q-1)\cdot 14)} &
+  \vb{0}_{1\times (n_m\cdot 12)} &
+  \vb{0}_{1\times 23}
+\\
+  \vdots & {} & {} & \ddots & {} & \vdots & \vdots
+\\
+  \lambda_{n_q+1}\, \vbs{\gamma}^{q}_{1\times 14} &
+  \vb{0}_{1\times 9} &
+  \vb{0}_{1\times 23} &
+  \vb{0}_{1\times ((n_q-1)\cdot 14)} &
+  \vbs{\gamma}^{q}_{1\times 14} &
+  \vb{0}_{1\times (n_m\cdot 12)} &
+  \vb{0}_{1\times 23}
+\end{array}
+\right] \\
+\vb{H_m} &=
+\left[
+\begin{array}{ccccc}
+  \lambda_{n_q+2}\, \vbs{\gamma}^{m}_{1\times 12} &
+  \vb{0}_{1\times (11+23+n_q\cdot 14)} &
+  \vbs{\gamma}^{m}_{1\times 12} &
+  \vb{0}_{1\times ((n_m-1)\cdot 12)} &
+  \vb{0}_{1\times 23}
+\\
+  \vdots & {} & \ddots & \vdots & \vdots
+\\
+  \lambda_{n_q+n_m+1}\, \vbs{\gamma}^{m}_{1\times 12} &
+  \vb{0}_{1\times (11+23+n_q\cdot 14)} &
+  \vb{0}_{1\times ((n_m-1)\cdot 12)} &
+  \vbs{\gamma}^{m}_{1\times 12} &
+  \vb{0}_{1\times 23}
+\end{array}
+\right],
+\end{aligned}
+$$
+
+где $\vbs{\gamma}^{y} = \bmqty{ \frac{1}{12} & \frac{2}{12} & \dots & 1 & \dots & \frac{2}{12} & \frac{1}{12} }$, $\vbs{\gamma}^{q} = \bmqty{ \frac{1}{3} & \frac{2}{3} & \vb{1}_{1 \times 10} & \frac{2}{3} & \frac{1}{3} }$ и $\vbs{\gamma}^{m} = \bmqty{ \vb{1}_{1 \times 12} }$ -- векторы коэффициентов лаговых полиномов темпорального агрегирования $\gamma_y(L)$, $\gamma_q(L)$, $\gamma_m(L)$, введённых в разделе "Методология". Тренд $\tau_t$ входит только в уравнение наблюдения для ВРП (строка $\vb{H_y}$) с тем же ядром $\vbs{\gamma}^{y}$, поскольку является месячной переменной, проходящей ту же годовую агрегацию. Нагрузка ВРП фиксирована: $\lambda_1 = 1$.
+
+Матрица динамики в уравнении состояния имеет вид $\vb{F} = \diag(\vb{F_f}, \vb{F_{y,1}}, \vb{F_{q,1}}, \dots, \vb{F_{q,n_q}}, \vb{F_{m,1}}, \dots, \vb{F_{m,n_m}}, \vb{F_\tau})$, где:
+$$
+\begin{aligned}
+\vb{F_f} &=
+\left[
+\begin{array}{cccc}
+  \phi_1 & \phi_2 & \vb{0}_{1 \times 21} \\
+  & \vb{I}_{22} & \vb{0}_{22 \times 1}
+\end{array}
+\right] \\[12pt]
+\vb{F_{y,i}} &=
+\left[
+\begin{array}{cccc}
+  \psi_{y,i,1} & \psi_{y,i,2} & \vb{0}_{1 \times 21} \\
+  & \vb{I}_{22} & \vb{0}_{22 \times 1}
+\end{array}
+\right] \\[12pt]
+\vb{F_{q,i}} &=
+\left[
+\begin{array}{cccc}
+  \psi_{q,i,1} & \psi_{q,i,2} & \vb{0}_{1 \times 12} \\
+  & \vb{I}_{13} & \vb{0}_{13 \times 1}
+\end{array}
+\right] \\[12pt]
+\vb{F_{m,i}} &=
+\left[
+\begin{array}{cccc}
+  \psi_{m,i,1} & \psi_{m,i,2} & \vb{0}_{1 \times 10} \\
+  & \vb{I}_{11} & \vb{0}_{11 \times 1}
+\end{array}
+\right] \\[12pt]
+\vb{F_\tau} &=
+\left[
+\begin{array}{cccc}
+  1 & \vb{0}_{1 \times 22} \\
+  \vb{I}_{22} & \vb{0}_{22 \times 1}
+\end{array}
+\right]
+\end{aligned}
+$$
+
+Блоки $\vb{F_f}$, $\vb{F_{y,i}}$, $\vb{F_{q,i}}$, $\vb{F_{m,i}}$ реализуют AR(2)-динамику в сопровождающей форме; $\vb{F_\tau}$ задаёт случайное блуждание с 23 состояниями (по числу весов ядра $\vbs{\gamma}^{y}$).
+
+Ковариационная матрица шоков состояния имеет следующий вид:
+$$
+\begin{aligned}
+\vb{R} &=
+\left[
+\begin{array}{ccccccc}
+  \sigma^2_f &        &               &        &             &        &   \\
+             & \ddots &               &        &             &        &   \\
+             &        & \sigma^2_i    &        &             &        &   \\
+             &        &               & \ddots &             &        &   \\
+             &        &               &        & \sigma^2_n  &        &   \\
+             &        &               &        &             & \sigma^2_\tau
+\end{array}
+\right],
+\end{aligned}
+$$
+
+где $\sigma^2_\tau = 10^{-4}$ зафиксировано и не оценивается.
+
+\newpage
+
+# Алгоритм семплирования по Гиббсу для динамической факторной модели {-}
+
+Алгоритм представляет собой блочный сэмплер Гиббса. На каждой итерации последовательно выполняются четыре шага: генерация всех состояний совместно, генерация параметров идиосинкратических компонент по каждой переменной, генерация факторных нагрузок, генерация параметров динамики общего фактора. Схема алгоритма приведена на рисунке в основном тексте.
+
+**Инициализация.** Задать начальные значения $\boldsymbol{\phi}^{(0)}$, $\sigma_f^{2(0)}$, $\{\lambda_i^{(0)}, \boldsymbol{\psi}_i^{(0)}, \sigma_i^{2(0)}\}_{i=1}^{n}$.
+
+---
+
+**Повторять для itr $= 1, \ldots, M_0 + M$ (при $M_0 = 5000$, $M = 5000$):**
+
+**1. Сгенерировать траекторию состояний** $f_{1:T},\; \{u_{i,1:T}\}_{i=1}^n,\; \tau_{1:T}$ совместно условно на $\mathbf{y}_{1:T}$ и текущих параметрах.
+
+Полная совместная выборка из $p(\boldsymbol{\xi}_{1:T} \mid \mathbf{y}_{1:T}, \theta)$ генерируется с помощью precision sampler [@antolindiezAdvancesNowcastingEconomic2024].
+
+**2. Сгенерировать AR-коэффициенты и дисперсию идиосинкратической компоненты** $\boldsymbol{\psi}_i$, $\sigma_i^2$ условно на $u_{i,1:T}$, для каждой переменной $i = 1, \ldots, n$.
+
+AR-коэффициенты генерируются из нормального сопряжённого распределения. Обозначим $\mathbf{X}_{\psi_i}$ -- матрицу лагов $u_{i,t-1}, \ldots, u_{i,t-2}$ размерности $T \times 2$:
+$$
+\boldsymbol{\psi}_i \mid u_{i,1:T},\, \sigma_i^2 \;\sim\; \mathcal{N}(\hat{\boldsymbol{\psi}}_i,\; \hat{\Sigma}_{\psi_i}),
+$$
+$$
+\hat{\Sigma}_{\psi_i} = \left(\sigma_\psi^{-2}\mathbf{I} + \frac{\mathbf{X}_{\psi_i}'\mathbf{X}_{\psi_i}}{\sigma_i^2}\right)^{-1}, \qquad
+\hat{\boldsymbol{\psi}}_i = \hat{\Sigma}_{\psi_i}\!\left(\sigma_\psi^{-2}\mu_\psi\mathbf{1} + \frac{\mathbf{X}_{\psi_i}'\mathbf{u}_i}{\sigma_i^2}\right).
+$$
+
+Дисперсия генерируется из обратного гамма-распределения. Обозначим остатки AR-процесса $e_{i,t} = u_{i,t} - \psi_{i,1} u_{i,t-1} - \psi_{i,2} u_{i,t-2}$:
+$$
+\sigma_i^2 \mid u_{i,1:T},\, \boldsymbol{\psi}_i \;\sim\; \mathcal{IG}\!\left(\tau + \frac{T_i}{2},\;\left(\eta^{-1} + \frac{\mathbf{e}_i'\mathbf{e}_i}{2}\right)^{-1}\right).
+$$
+
+Стационарность $\boldsymbol{\psi}_i$ обеспечивается отклонением несостоятельных выборок.
+
+**3. Сгенерировать факторную нагрузку** $\lambda_i$ условно на $f_{1:T}$, $u_{i,1:T}$, $\boldsymbol{\psi}_i$, $\sigma_i^2$, для каждой переменной $i$ кроме ВРП (для которой $\lambda_1 = 1$ зафиксировано).
+
+Нагрузка генерируется из нормального сопряжённого распределения. Обозначим $\tilde{\mathbf{x}}_i$ -- вектор квазидифференцированных значений фактора, $\tilde{\mathbf{y}}_i^*$ -- вектор квазидифференцированных значений наблюдаемой переменной (после AR(2)-фильтрации и масштабирования на $1/\sigma_i$):
+$$
+\lambda_i \mid f_{1:T},\, u_{i,1:T},\, \boldsymbol{\psi}_i,\, \sigma_i^2 \;\sim\; \mathcal{N}(\hat{\lambda}_i,\; \hat{v}_{\lambda_i}),
+$$
+$$
+\hat{v}_{\lambda_i} = \left(\sigma_\lambda^{-2} + \tilde{\mathbf{x}}_i'\tilde{\mathbf{x}}_i\right)^{-1}, \qquad
+\hat{\lambda}_i = \hat{v}_{\lambda_i}\!\left(\sigma_\lambda^{-2}\mu_\lambda + \tilde{\mathbf{x}}_i'\tilde{\mathbf{y}}_i^*\right).
+$$
+
+**4. Сгенерировать AR-коэффициенты и дисперсию общего фактора** $\boldsymbol{\phi}$, $\sigma_f^2$ условно на $f_{1:T}$.
+
+AR-коэффициенты генерируются из нормального сопряжённого распределения. Обозначим $\mathbf{X}_\phi$ -- матрицу лагов $f_{t-1}, f_{t-2}$ размерности $T \times 2$:
+$$
+\boldsymbol{\phi} \mid f_{1:T},\, \sigma_f^2 \;\sim\; \mathcal{N}(\hat{\boldsymbol{\phi}},\; \hat{\Sigma}_\phi),
+$$
+$$
+\hat{\Sigma}_\phi = \left(\sigma_\phi^{-2}\mathbf{I} + \frac{\mathbf{X}_\phi'\mathbf{X}_\phi}{\sigma_f^2}\right)^{-1}, \qquad
+\hat{\boldsymbol{\phi}} = \hat{\Sigma}_\phi\!\left(\sigma_\phi^{-2}\mu_\phi\mathbf{1} + \frac{\mathbf{X}_\phi'\mathbf{f}}{\sigma_f^2}\right).
+$$
+
+Дисперсия генерируется из обратного гамма-распределения. Обозначим остатки AR-процесса фактора $e_{f,t} = f_t - \phi_1 f_{t-1} - \phi_2 f_{t-2}$:
+$$
+\sigma_f^2 \mid f_{1:T},\, \boldsymbol{\phi} \;\sim\; \mathcal{IG}\!\left(\tau_f + \frac{T}{2},\;\left(\eta_f^{-1} + \frac{\mathbf{e}_f'\mathbf{e}_f}{2}\right)^{-1}\right).
+$$
+
+В случае, если сэмплер генерирует нестационарный AR-процесс, он отклоняется и процесс повторяется снова.
+
+**Сохранить результаты итерации**, если $\text{itr} > M_0$.
+
+---
+
+По $M = 5000$ сохранённым выборкам вычислить медианные оценки параметров $\hat{\boldsymbol{\phi}}$, $\hat{\sigma}_f^2$, $\{\hat{\lambda}_i, \hat{\boldsymbol{\psi}}_i, \hat{\sigma}_i^2\}$ и медианные траектории состояний $\{\hat{f}_t, \hat{u}_{it}, \hat{\tau}_t\}_{t=1}^T$.
+
+\newpage
+
+
+# Диагностика сходимости MCMC {-}
+
+```{r}
+#| label: mcmc_diag
+if (MODEL_CASE == "NOGDP") {
+  diagDf <- tar_read(diagNoGdp)
+} else {
+  diagDf <- tar_read(diagGdp)
+}
+ifDf <- diagDf %>%
+  group_by(region, group) %>%
+  summarise(mean_IF = mean(IF), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = mean_IF)
+gwDf <- diagDf %>%
+  group_by(region, group) %>%
+  summarise(
+    share_reject = mean(abs(geweke_z) > 1.96, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = group, values_from = share_reject)
+grp_cols <- setdiff(names(ifDf), "region")
+if_cols <- paste0("if_", grp_cols)
+gw_cols <- paste0("gw_", grp_cols)
+names(ifDf) <- c("region", if_cols)
+names(gwDf) <- c("region", gw_cols)
+combined_diag <- ifDf %>%
+  left_join(gwDf, by = "region") %>%
+  left_join(
+    codes %>% select(abbrev, Region = name_rus),
+    by = c("region" = "abbrev")
+  ) %>%
+  select(Region, all_of(if_cols), all_of(gw_cols))
+ft_diag <- combined_diag %>%
+  flextable() %>%
+  tabForm(
+    cap = paste0(
+      "Диагностика сходимости MCMC (модель ",
+      MODEL_CASE,
+      ")"
+    )
+  ) %>%
+  set_header_labels(
+    values = setNames(
+      c("Регион", grp_cols, grp_cols),
+      c("Region", if_cols, gw_cols)
+    )
+  ) %>%
+  add_header_row(
+    values = c(
+      "",
+      "Средний фактор неэффективности",
+      "Доля |z| > 1.96 (тест Гевеке)"
+    ),
+    colwidths = c(1, length(if_cols), length(gw_cols))
+  ) %>%
+  colformat_double(j = if_cols, digits = 1) %>%
+  colformat_double(j = gw_cols, digits = 2)
+ft_diag
+```
+
+
+\newpage
+
+# Оценки факторных нагрузок отдельных переменных для российских регионов {-}
+
+```{r}
+#| label: reglambda_prep
+#| include: false
+abbrevRegion <- function(x) {
+  x %>%
+    str_replace_all(" автономная область$", " авт. обл.") %>%
+    str_replace_all(" автономный округ$", " АО") %>%
+    str_replace_all(" область$", " обл.") %>%
+    str_replace_all(" Республика$", " Респ.") %>%
+    str_replace_all("^Республика ", "Респ. ")
+}
+heatdat <- lambda %>%
+  filter(var != "grp") %>%
+  left_join(
+    codes %>% transmute(abbrev, region = abbrevRegion(name_rus)),
+    by = "abbrev"
+  ) %>%
+  group_by(region) %>%
+  mutate(
+    rng = max(lambda) - min(lambda),
+    lambda_norm = if_else(rng > 0, (lambda - min(lambda)) / rng, 0.5)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    var = if_else(
+      var == "gdp",
+      "ВВП",
+      setNames(names(renameVectorRuShort), renameVectorRuShort)[as.character(
+        var
+      )]
+    )
+  )
+var_order <- heatdat %>%
+  group_by(var) %>%
+  summarise(m = mean(lambda), .groups = "drop") %>%
+  arrange(desc(m)) %>%
+  pull(var)
+region_order <- sort(unique(heatdat$region))
+n_half <- ceiling(length(region_order) / 2)
+regions_part1 <- region_order[1:n_half]
+regions_part2 <- region_order[(n_half + 1):length(region_order)]
+heatPlot <- function(regs) {
+  heatdat %>%
+    filter(region %in% regs) %>%
+    mutate(
+      var = factor(var, levels = var_order),
+      region = factor(region, levels = rev(regs))
+    ) %>%
+    ggplot(aes(x = var, y = region, fill = lambda_norm)) +
+    geom_tile(color = "white", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", lambda)), size = 2.2) +
+    scale_fill_gradient(low = "white", high = "#1B7837", limits = c(0, 1)) +
+    scale_x_discrete(
+      position = "top",
+      labels = function(x) gsub(" ", "\n", x)
+    ) +
+    labs(x = NULL, y = NULL) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      legend.position = "none",
+      axis.text.x = element_text(
+        angle = 0,
+        hjust = 0.5,
+        size = 7,
+        lineheight = 0.9
+      ),
+      axis.text.y = element_text(size = 7)
+    )
+}
+```
+
+```{r}
+#| label: reglambda1
+#| fig.cap: "Факторные нагрузки по регионам и переменным"
+#| fig.width: 6.988
+#| fig.height: 8.0
+#| dpi: !expr PLOT_DPI
+heatPlot(regions_part1)
+```
+
+```{r}
+#| label: reglambda2
+#| fig.width: 6.988
+#| fig.height: 8.0
+#| dpi: !expr PLOT_DPI
+heatPlot(regions_part2)
+```
+`r figNote('в ячейках указаны медианные апостериорные оценки факторных нагрузок. Цвет ячейки отражает относительную величину нагрузки внутри каждого региона (нормирование по принципу min-max в строке): белый соответствует наименьшей нагрузке в регионе, насыщенный зелёный — наибольшей. Колонки упорядочены по убыванию средней нагрузки между регионами.')`
+
+\newpage
+
+<!-- # Оценка качества прогнозов по горизонтам {-} -->
+
+```{r}
+#| label: eval_load
+flipHorizon <- function(eval_obj) {
+  lapply(eval_obj, function(x) {
+    if (is.data.frame(x) && "horizon" %in% names(x)) {
+      x$horizon <- -x$horizon
+    }
+    x
+  })
+}
+evalNoGdp <- flipHorizon(tar_read(evalResultsNoGdp))
+evalGdp <- flipHorizon(tar_read(evalResultsGdp))
+evalResults <- if (MODEL_CASE == "NOGDP") evalNoGdp else evalGdp
+```
+
+```{r}
+#| label: eval_horizon_full
+#| eval: FALSE
+#| include: FALSE
+rw_rows <- evalResults$byHorizon %>%
+  filter(benchmark == "rw", horizon %in% HORIZONS) %>%
+  select(horizon, n, mae_model, crps, rel_mae_rw = rel_mae)
+ivbo_rows <- evalResults$byHorizon %>%
+  filter(benchmark == "ivbo", horizon %in% HORIZONS) %>%
+  select(horizon, rel_mae_ivbo = rel_mae)
+metric_labels <- c(
+  n = "Кол-во наблюдений",
+  mae_model = "MAE",
+  crps = "CRPS",
+  rel_mae_rw = "rel_mae_rw",
+  rel_mae_ivbo = "rel_mae_ivbo"
+)
+eqn_map <- c(
+  rel_mae_rw = "MAE_{DFM}/MAE_{RW}",
+  rel_mae_ivbo = "MAE_{DFM}/MAE_{IVBO}"
+)
+ft <- rw_rows %>%
+  left_join(ivbo_rows, by = "horizon") %>%
+  pivot_longer(-horizon, names_to = "Показатель", values_to = "value") %>%
+  pivot_wider(names_from = horizon, values_from = value) %>%
+  mutate(Показатель = metric_labels[Показатель]) %>%
+  flextable()
+for (key in names(eqn_map)) {
+  i <- which(metric_labels == key)
+  ft <- compose(
+    ft,
+    i = i,
+    j = "Показатель",
+    value = as_paragraph(as_equation(eqn_map[key]))
+  )
+}
+ft %>%
+  add_footer_lines(
+    "Примечание: RW – случайное блуждание; IVBO – индекс выпуска базовых отраслей. Относительные метрики представляют собой отношение ошибки модели к ошибке бенчмарка (значения ниже 1 свидетельствуют о превосходстве модели). IVBO доступен только для горизонтов h = -3 и h = -6."
+  ) %>%
+  tabForm(
+    cap = paste0(
+      "Качество прогнозов прокси-ВРП по горизонтам (модель ",
+      MODEL_CASE,
+      ")"
+    ),
+  ) %>%
+  colformat_double(i = 1, digits = 0)
+```
+
+# Относительная MAE по регионам {-}
+
+```{r}
+#| label: eval_region_table
+rw_reg <- evalResults$byRegion %>%
+  filter(benchmark == "rw", horizon %in% HORIZONS) %>%
+  select(region, horizon, rel_mae, dm_pvalue) %>%
+  pivot_wider(
+    names_from = horizon,
+    values_from = c(rel_mae, dm_pvalue),
+    names_sep = "_"
+  )
+ivbo_reg <- evalResults$byRegion %>%
+  filter(benchmark == "ivbo", horizon == -3) %>%
+  select(region, ivbo_3 = rel_mae, ivbo_p_3 = dm_pvalue)
+rw_cols <- paste0("rw_", HORIZONS)
+rw_val_cols <- paste0("rel_mae_", HORIZONS)
+rw_p_cols <- paste0("dm_pvalue_", HORIZONS)
+regDf <- rw_reg %>%
+  left_join(ivbo_reg, by = "region") %>%
+  left_join(
+    codes %>% select(abbrev, Region = name_rus),
+    by = c("region" = "abbrev")
+  )
+names(regDf)[match(rw_val_cols, names(regDf))] <- rw_cols
+ft_reg <- regDf %>%
+  select(Region, all_of(rw_cols), ivbo_3) %>%
+  flextable() %>%
+  set_header_labels(
+    values = setNames(
+      c("Регион", as.character(HORIZONS), "-3"),
+      c("Region", rw_cols, "ivbo_3")
+    )
+  )
+for (j in seq_along(HORIZONS)) {
+  sig <- regDf[[rw_p_cols[j]]]
+  bold_rows <- which(!is.na(sig) & sig < 0.10)
+  if (length(bold_rows) > 0) {
+    ft_reg <- bold(ft_reg, i = bold_rows, j = rw_cols[j])
+  }
+}
+ivbo_sig <- regDf[["ivbo_p_3"]]
+bold_ivbo <- which(!is.na(ivbo_sig) & ivbo_sig < 0.10)
+if (length(bold_ivbo) > 0) {
+  ft_reg <- bold(ft_reg, i = bold_ivbo, j = "ivbo_3")
+}
+ft_reg %>%
+  add_header_row(
+    values = c("", "RW", "IVBO"),
+    colwidths = c(1, length(rw_cols), 1)
+  ) %>%
+  add_footer_lines(
+    "Примечание: значения представляют собой отношение MAE модели к MAE бенчмарка. RW – случайное блуждание; IVBO – индекс выпуска базовых отраслей. Жирным выделены значения, для которых тест Диболда–Мариано значим на уровне 10%."
+  ) %>%
+  tabForm(
+    cap = paste0(
+      "Относительная MAE по регионам (модель ",
+      MODEL_CASE,
+      ")"
+    )
+  )
+```
+
+\newpage
+
+<!-- # Распределение абсолютных ошибок прогнозирования по годам {-}
+
+```{r}
+#| label: eval_boxplot_year
+#| fig.cap: "Распределение абсолютных ошибок прогнозирования по годам и горизонтам"
+#| fig.width: 12
+#| fig.height: 8
+#| out.width: "80%"
+#| dpi: !expr PLOT_DPI
+horizonLabels <- setNames(
+  paste0("h = ", BOXPLOT_HORIZONS),
+  BOXPLOT_HORIZONS
+)
+boxData <- evalResults$details %>%
+  filter(horizon %in% BOXPLOT_HORIZONS) %>%
+  transmute(
+    target_year,
+    horizon,
+    `DFM` = abs(error_model),
+    `RW` = abs(error_rw),
+    `IVBO` = abs(error_ivbo)
+  ) %>%
+  pivot_longer(
+    cols = c(`DFM`, `RW`, `IVBO`),
+    names_to = "source",
+    values_to = "abs_error"
+  ) %>%
+  filter(!is.na(abs_error)) %>%
+  mutate(
+    abs_error = pmax(abs_error, 0.01),
+    source = factor(source, levels = c("DFM", "RW", "IVBO")),
+    horizon = factor(horizon, levels = BOXPLOT_HORIZONS, labels = horizonLabels)
+  )
+ggplot(boxData, aes(x = factor(target_year), y = abs_error, fill = source)) +
+  geom_boxplot(
+    outlier.size = 0.8,
+    position = position_dodge(0.8),
+    width = 0.7
+  ) +
+  facet_wrap(~horizon, ncol = 2) +
+  labs(x = NULL, y = "Абсолютная ошибка, п.п.", fill = NULL) +
+  scale_fill_manual(
+    values = c("DFM" = cols_2[2], "RW" = "grey70", "IVBO" = cols_1[2])
+  ) +
+  scale_y_continuous(
+    trans = scales::log2_trans(),
+    breaks = c(0.5, 1, 2, 4, 8, 16, 32),
+    labels = c("0.5", "1", "2", "4", "8", "16", "32")
+  )
+```
+
+`r figNote('DFM – динамическая факторная модель; RW – случайное блуждание; IVBO – индекс выпуска базовых отраслей. Каждый ящик отражает распределение абсолютных ошибок прогнозирования по регионам для данного года. IVBO доступен только для горизонтов h = -3 и h = -6.')`
+
+\newpage -->
+
+# Качество прогнозов по федеральным округам {-}
+
+```{r}
+#| label: eval_district_table
+distRw <- evalResults$byDistrict %>%
+  filter(benchmark == "rw", horizon %in% HORIZONS) %>%
+  select(district, horizon, rel_wmae, wdm_pvalue) %>%
+  pivot_wider(
+    names_from = horizon,
+    values_from = c(rel_wmae, wdm_pvalue),
+    names_sep = "_"
+  )
+distIvbo <- evalResults$byDistrict %>%
+  filter(benchmark == "ivbo", horizon == -3) %>%
+  select(district, rel_wmae_3 = rel_wmae, wdm_pvalue_3 = wdm_pvalue)
+rw_val_cols <- paste0("rel_wmae_", HORIZONS)
+rw_p_cols <- paste0("wdm_pvalue_", HORIZONS)
+distTable <- distRw %>%
+  left_join(distIvbo, by = "district", suffix = c("", "_ivbo")) %>%
+  rename(ivbo_3 = rel_wmae_3_ivbo, ivbo_p_3 = wdm_pvalue_3_ivbo)
+display_rw <- paste0("rw_", HORIZONS)
+names(distTable) <- c(
+  "district",
+  display_rw,
+  rw_p_cols,
+  "ivbo_3",
+  "ivbo_p_3"
+)
+ft_dist <- distTable %>%
+  select(district, all_of(display_rw), ivbo_3) %>%
+  flextable() %>%
+  set_header_labels(
+    values = setNames(
+      c("Округ", as.character(HORIZONS), "-3"),
+      c("district", display_rw, "ivbo_3")
+    )
+  )
+for (j in seq_along(HORIZONS)) {
+  sig <- distTable[[rw_p_cols[j]]]
+  bold_rows <- which(!is.na(sig) & sig < 0.10)
+  if (length(bold_rows) > 0) {
+    ft_dist <- bold(ft_dist, i = bold_rows, j = display_rw[j])
+  }
+}
+ivbo_sig <- distTable[["ivbo_p_3"]]
+bold_ivbo <- which(!is.na(ivbo_sig) & ivbo_sig < 0.10)
+if (length(bold_ivbo) > 0) {
+  ft_dist <- bold(ft_dist, i = bold_ivbo, j = "ivbo_3")
+}
+ft_dist %>%
+  add_header_row(
+    values = c("", "MAE_{DFM}/MAE_{RW}", "MAE_{DFM}/MAE_{IVBO}"),
+    colwidths = c(1, length(display_rw), 1)
+  ) %>%
+  compose(
+    part = "header",
+    i = 1,
+    j = 2,
+    value = as_paragraph(as_equation("MAE_{DFM}/MAE_{RW}"))
+  ) %>%
+  compose(
+    part = "header",
+    i = 1,
+    j = 2 + length(display_rw),
+    value = as_paragraph(as_equation("MAE_{DFM}/MAE_{IVBO}"))
+  ) %>%
+  add_footer_lines(
+    "Примечание: метрики взвешены по доле региона в суммарном ВРП. RW – случайное блуждание; IVBO – индекс выпуска базовых отраслей. Жирным выделены значения, для которых тест Диболда–Мариано значим на уровне 10%."
+  ) %>%
+  tabForm(
+    cap = paste0(
+      "Относительная MAE по федеральным округам (модель ",
+      MODEL_CASE,
+      ")"
+    )
+  )
+```
+
+\newpage
+
+# HPD-интервалы прогнозов (2020 г.) {-}
+
+```{r}
+#| label: eval_interval_episode_prep
+#| include: false
+EPISODE_YEAR <- 2020
+EPISODE_HORIZONS <- c(6, 3, 0, -3)
+panelMetrics <- evalResults$byYear %>%
+  filter(
+    target_year == EPISODE_YEAR,
+    benchmark == "rw",
+    horizon %in% EPISODE_HORIZONS
+  ) %>%
+  transmute(
+    horizon,
+    panel_label = sprintf(
+      "h = %d\nMAE = %.2f\nCRPS = %.2f",
+      horizon,
+      wmae_model,
+      wcrps
+    )
+  )
+intData <- evalResults$details %>%
+  filter(target_year == EPISODE_YEAR, horizon %in% EPISODE_HORIZONS) %>%
+  mutate(
+    hpd = purrr::map(draws, ~ hpdInterval(.x, 0.68)),
+    lo = purrr::map_dbl(hpd, "l"),
+    hi = purrr::map_dbl(hpd, "u")
+  ) %>%
+  left_join(
+    codes %>% transmute(abbrev, name_rus = abbrevRegion(name_rus)),
+    by = c("region" = "abbrev")
+  ) %>%
+  left_join(panelMetrics, by = "horizon") %>%
+  mutate(
+    horizon_label = factor(panel_label, levels = panelMetrics$panel_label)
+  )
+intRegionOrder <- intData %>%
+  filter(horizon == 0) %>%
+  arrange(desc(actual)) %>%
+  pull(name_rus) %>%
+  unique()
+n_half_int <- ceiling(length(intRegionOrder) / 2)
+int_part1 <- intRegionOrder[1:n_half_int]
+int_part2 <- intRegionOrder[(n_half_int + 1):length(intRegionOrder)]
+intXLim <- range(c(intData$lo, intData$hi, intData$actual), na.rm = TRUE)
+intervalPlot <- function(regs) {
+  intData %>%
+    filter(name_rus %in% regs) %>%
+    mutate(name_rus = factor(name_rus, levels = rev(regs))) %>%
+    ggplot(aes(y = name_rus)) +
+    geom_segment(
+      aes(x = lo, xend = hi, yend = name_rus),
+      color = cols_1[2],
+      linewidth = 0.9,
+      alpha = 0.7
+    ) +
+    geom_point(aes(x = model_forecast), color = cols_1[2], size = 1.3) +
+    geom_point(
+      aes(x = actual),
+      shape = 4,
+      color = "red",
+      size = 1.6,
+      stroke = 0.7
+    ) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    facet_wrap(~horizon_label, ncol = 4) +
+    coord_cartesian(xlim = intXLim) +
+    labs(x = "Прокси-ВРП, % г/г", y = NULL) +
+    theme_minimal() +
+    theme(
+      panel.grid.major.y = element_line(color = "grey90"),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold", size = 7, lineheight = 0.9),
+      axis.text.x = element_text(size = 7),
+      axis.text.y = element_text(size = 7),
+      axis.title.x = element_text(size = 8),
+      legend.position = "none"
+    )
+}
+```
+
+```{r}
+#| label: eval_interval_episode1
+#| fig.cap: "68% доверительные интервалы прогнозов прокси-ВРП по регионам (2020 г.)"
+#| fig.width: 6.988
+#| fig.height: 8.0
+#| dpi: !expr PLOT_DPI
+intervalPlot(int_part1)
+```
+
+```{r}
+#| label: eval_interval_episode2
+#| fig.width: 6.988
+#| fig.height: 8.0
+#| dpi: !expr PLOT_DPI
+intervalPlot(int_part2)
+```
+
+`r figNote('синие отрезки – 68% апостериорные доверительные интервалы (HPD) прогнозов модели DFM. Синие точки – точечные прогнозы (медиана апостериорного распределения). Красные крестики – фактические значения. Регионы отсортированы по фактическому значению при h = 0.')`
+
+\newpage
+
+# Гетерогенность ширины доверительных интервалов 2020 г. {-}
+
+```{r}
+#| label: unc_2020_prep
+#| include: false
+sectorChars <- read_excel(path, sheet = "ФАКТОРЫ СВОД", col_types = "text") %>%
+  transmute(
+    OKATO_id = as.numeric(OKATO_id),
+    extraction = as.numeric(Extraction),
+    industry = as.numeric(Industry),
+    construction = as.numeric(Construction)
+  )
+grpAnn <- tar_read(grp) %>%
+  mutate(year = year(date), yoy = log(value / lag(value)) * 100) %>%
+  group_by(Abbrev) %>%
+  arrange(year, .by_group = TRUE) %>%
+  summarise(
+    logGrp = log(value[year == 2019][1]),
+    grpMean = mean(yoy[year >= 2010 & year <= 2019], na.rm = TRUE),
+    grpVol = sd(yoy[year >= 2010 & year <= 2019], na.rm = TRUE),
+    .groups = "drop"
+  )
+fdMap <- read_csv(
+  file.path(PROJECT_ROOT, "Technical/district_map.csv"),
+  show_col_types = FALSE,
+  col_types = cols(OKATO_id = col_double())
+) %>%
+  select(Abbrev, OKATO_id, FD)
+uncPanel <- evalResults$details %>%
+  filter(target_year == 2020, horizon == 0) %>%
+  mutate(
+    width = purrr::map_dbl(
+      draws,
+      ~ {
+        h <- hpdInterval(.x, 0.68)
+        h$u - h$l
+      }
+    )
+  ) %>%
+  select(Abbrev = region, width) %>%
+  inner_join(grpAnn, by = "Abbrev") %>%
+  inner_join(fdMap, by = "Abbrev") %>%
+  inner_join(sectorChars, by = "OKATO_id") %>%
+  mutate(
+    FD = factor(FD),
+    across(
+      c(width, logGrp, grpMean, grpVol, extraction, industry, construction),
+      ~ . - mean(.)
+    )
+  )
+```
+
+```{r}
+#| label: unc_2020_reg
+m1 <- lm(
+  width ~ 0 + logGrp + grpMean + grpVol + extraction + industry + construction,
+  data = uncPanel
+)
+m2 <- lm(
+  width ~ 0 +
+    FD +
+    logGrp +
+    grpMean +
+    grpVol +
+    extraction +
+    industry +
+    construction,
+  data = uncPanel
+)
+fmtModel <- function(m) {
+  ct <- coeftest(m, vcov. = vcovHC(m, type = "HC1"))
+  stars <- as.character(symnum(
+    ct[, 4],
+    cutpoints = c(0, 0.01, 0.05, 0.10, 1),
+    symbols = c("***", "**", "*", ""),
+    corr = FALSE
+  ))
+  setNames(sprintf("%.2f%s", ct[, 1], stars), rownames(ct))
+}
+terms <- c(
+  paste0("FD", levels(uncPanel$FD)),
+  "logGrp",
+  "grpMean",
+  "grpVol",
+  "extraction",
+  "industry",
+  "construction"
+)
+labels <- c(
+  paste0("ФО: ", levels(uncPanel$FD)),
+  "log(ВРП 2019)",
+  "Среднее темпа роста ВРП, 2010-2019",
+  "СКО темпа роста ВРП, 2010-2019",
+  "Доля добычи в ВРП",
+  "Доля обработки в ВРП",
+  "Доля строительства в ВРП"
+)
+regTable <- tibble(
+  Переменная = labels,
+  M1 = fmtModel(m1)[terms],
+  M2 = fmtModel(m2)[terms]
+) %>%
+  bind_rows(tibble(
+    Переменная = c("Наблюдений", "R²"),
+    M1 = c(as.character(nobs(m1)), sprintf("%.2f", summary(m1)$r.squared)),
+    M2 = c(as.character(nobs(m2)), sprintf("%.2f", summary(m2)$r.squared))
+  )) %>%
+  mutate(across(M1:M2, ~ tidyr::replace_na(., "")))
+flextable(regTable) %>%
+  add_footer_lines(
+    "Примечание: коэффициенты при ФО – отклонения средней ширины HPD округа от выборочного среднего. Стандартные ошибки робастные (HC1). *, **, *** – значимость на уровне 10, 5 и 1%."
+  ) %>%
+  tabForm(
+    cap = "Ширина 68% HPD прогноза прокси-ВРП на 2020 г. (h = 0): связь с характеристиками регионов"
+  ) %>%
+  align(j = c("M1", "M2"), align = "center", part = "body") %>%
+  align(j = "Переменная", align = "left", part = "body")
+```
+
+<!--
+\newpage
+
+# Сравнение моделей с ВВП и без ВВП {-}
+
+```{r}
+#| label: gdp_vs_nogdp
+#| eval: false
+#| include: false
+metric_labels_gdp <- c(
+  mae_nogdp = "MAE (без ВВП)",
+  mae_gdp = "MAE (с ВВП)",
+  rel_MAE = "rel_MAE",
+  crps_nogdp = "CRPS (без ВВП)",
+  crps_gdp = "CRPS (с ВВП)",
+  rel_CRPS = "rel_CRPS"
+)
+eqn_map_gdp <- c(
+  rel_MAE = "MAE_{GDP}/MAE_{noGDP}",
+  rel_CRPS = "CRPS_{GDP}/CRPS_{noGDP}"
+)
+combined_gdp <- evalNoGdp$byHorizon %>%
+  filter(benchmark == "rw", horizon %in% HORIZONS) %>%
+  select(horizon, mae_nogdp = mae_model, crps_nogdp = crps) %>%
+  inner_join(
+    evalGdp$byHorizon %>%
+      filter(benchmark == "rw", horizon %in% HORIZONS) %>%
+      select(horizon, mae_gdp = mae_model, crps_gdp = crps),
+    by = "horizon"
+  ) %>%
+  mutate(
+    rel_MAE = mae_gdp / mae_nogdp,
+    rel_CRPS = crps_gdp / crps_nogdp
+  )
+ft_gdp <- combined_gdp %>%
+  select(
+    horizon,
+    mae_nogdp,
+    mae_gdp,
+    rel_MAE,
+    crps_nogdp,
+    crps_gdp,
+    rel_CRPS
+  ) %>%
+  pivot_longer(-horizon, names_to = "Показатель", values_to = "value") %>%
+  pivot_wider(names_from = horizon, values_from = value) %>%
+  mutate(Показатель = metric_labels_gdp[Показатель]) %>%
+  flextable()
+for (key in names(eqn_map_gdp)) {
+  i <- which(metric_labels_gdp == key)
+  ft_gdp <- compose(
+    ft_gdp,
+    i = i,
+    j = "Показатель",
+    value = as_paragraph(as_equation(eqn_map_gdp[key]))
+  )
+}
+ft_gdp %>%
+  add_footer_lines(
+    "Примечание: относительные метрики представляют собой отношение ошибки модели с ВВП к ошибке модели без ВВП. Значения ниже 1 означают, что модель с ВВП точнее."
+  ) %>%
+  tabForm(
+    cap = "Сравнение точности моделей с ВВП и без ВВП"
+  )
+```
+-->
